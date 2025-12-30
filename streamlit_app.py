@@ -77,7 +77,7 @@ def registrar_fichaje_normal(empleado_id, tipo, id_fichaje=None):
     fecha = ahora.strftime('%Y-%m-%d')
     
     if tipo == "ENTRADA":
-        # Por defecto, un fichaje normal es 'pendiente' hasta que la jefa lo revise
+        # Por defecto, un fichaje normal es 'pendiente' hasta que sea revisado
         data = {"empleado_id": empleado_id, "fecha": fecha, "hora_entrada": hora, "tipo_registro": "trabajo", "estado": "pendiente"}
         supabase.table('fichajes').insert(data).execute()
         st.toast(f"✅ Entrada registrada a las {hora}. Pendiente de aprobación.")
@@ -121,7 +121,7 @@ nombres_login = [u['nombre'] for u in lista_emps] if lista_emps else []
 
 if 'usuario' not in st.session_state:
     # --- PANTALLA DE LOGIN ESTILIZADA ---
-    st.markdown("<h1 style='text-align: center; color: #D4A5A5;'>Bienvenida al Portal del Empleado</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; color: #D4A5A5;'>Bienvenida al portal de registro horario</h1>", unsafe_allow_html=True)
     st.write("") # Espacio
     
     col_spacer1, col_login, col_spacer2 = st.columns([1, 2, 1])
