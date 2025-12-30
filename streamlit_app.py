@@ -49,7 +49,10 @@ def es_laborable(fecha: date):
     if fecha in FESTIVOS: return False
     return True
 
-def enviar_alerta_email(nombre_emp, fecha, motivo, entrada, salida, es_futuro=False):
+def enviar_alerta_email(nombre_emp, fecha_str, motivo, entrada, salida, es_futuro=False, es_rango=False):
+    """
+    Envía email. fecha_str puede ser una fecha simple o un texto de rango "X al Y".
+    """
     try:
         smtp_server = st.secrets["EMAIL"]["smtp_server"]
         port = st.secrets["EMAIL"]["smtp_port"]
@@ -57,7 +60,15 @@ def enviar_alerta_email(nombre_emp, fecha, motivo, entrada, salida, es_futuro=Fa
         password = st.secrets["EMAIL"]["sender_password"]
         receiver = st.secrets["EMAIL"]["admin_email"]
 
-        asunto = f"✈️ Solicitud Futura: {nombre_emp}" if es_futuro else f"🔔 Corrección Horaria: {nombre_emp}"
+        if es_rango:
+            asunto = f"✈️ Solicitud de Vacaciones (Periodo): {nombre_emp}"
+            texto_fecha = f"Periodo solicitado: {fecha_str}"
+        elif es_futuro:
+            asunto = f"✈️ Solicitud Futura: {nombre_emp}"
+            texto_fecha = f"Fecha: {fecha_str}"
+        else:
+            asunto = f"🔔 Corrección Horaria: {nombre_emp}"
+            texto_fecha = f"Fecha: {fecha_str}"
         
         msg = MIMEMultipart()
         msg['From'] = sender
@@ -67,14 +78,14 @@ def enviar_alerta_email(nombre_emp, fecha, motivo, entrada, salida, es_futuro=Fa
         body = f"""
         Hola Alberto,
         
-        {nombre_emp} ha enviado una solicitud:
+        {nombre_emp} ha enviado una nueva solicitud:
         
-        - Tipo: {'PLANIFICACIÓN FUTURA' if es_futuro else 'CORRECCIÓN PASADA'}
-        - Fecha: {fecha}
+        - Tipo: {'PLANIFICACIÓN (VACACIONES/AUSENCIA)' if es_futuro or es_rango else 'CORRECCIÓN PASADA'}
+        - {texto_fecha}
         - Motivo: {TIPOS_REGISTRO.get(motivo, motivo)}
         - Horario: {entrada} a {salida}
         
-        Entra en la App para aprobarlo.
+        Entra en la App para revisar y aprobar los días correspondientes.
         """
         msg.attach(MIMEText(body, 'plain'))
 
@@ -126,10 +137,10 @@ def generar_calendario_html(year, month, dias_fichados, dias_faltantes):
                 else:
                      html += f"<td>{day_content}<div class='status-ok'>✅ Registrado</div></td>"
             elif day in dias_faltantes:
-                # Solo marcamos falta si está en la lista de faltantes (que ya filtra futuro)
+                # Solo marcamos falta si está en la lista de faltantes
                 html += f"<td style='background-color: #FFEBEE;'>{day_content}<div class='status-missing'>⚠️ FALTA</div></td>"
             else:
-                # Futuro o laborable sin pasar (blanco)
+                # Futuro o laborable sin pasar
                 html += f"<td>{day_content}</td>"
         html += "</tr>"
     html += "</tbody></table>"
@@ -175,7 +186,6 @@ else:
             if not pendientes.data: st.success("✅ Todo al día.")
             for p in pendientes.data:
                 with st.container():
-                    # Color diferente si es futuro (Planificación) o pasado (Corrección)
                     es_futuro = p['fecha'] > datetime.now(TZ_VALENCIA).strftime('%Y-%m-%d')
                     icono = "✈️" if es_futuro else "⚠️"
                     titulo = "Solicitud Futura" if es_futuro else "Corrección / Olvido"
@@ -183,6 +193,7 @@ else:
                     st.markdown(f"""<div style='background-color:#FFF3E0;padding:10px;border-radius:5px;margin-bottom:5px; border-left: 5px solid #FF9800;'>
                     <strong>{icono} {titulo}</strong><br>
                     <strong>{p['fecha']}</strong> | {p['empleados']['nombre']} | <em>{p['tipo_registro']}</em> <br>
+                    <small>Nota: {p['notas_admin'] or ''}</small>
                     </div>""", unsafe_allow_html=True)
                     
                     c1, c2 = st.columns([1,4])
@@ -209,36 +220,30 @@ else:
     else:
         st.markdown(f"### Hola, {user['nombre']} 👋")
         
-        # 1. CÁLCULO DE CALENDARIO
         hoy = datetime.now(TZ_VALENCIA).date()
         mes_actual = hoy.month
         year_actual = hoy.year
         
-        # Obtener rango del mes
         _, num_dias = calendar.monthrange(year_actual, mes_actual)
         inicio_mes = date(year_actual, mes_actual, 1)
         fin_mes = date(year_actual, mes_actual, num_dias)
         
-        # Obtener fichajes del mes (incluyendo futuros si están planificados)
         registros_db = supabase.table('fichajes').select("fecha, estado").eq('empleado_id', user['id']).gte('fecha', inicio_mes).lte('fecha', fin_mes).execute()
-        
         fechas_fichadas = {datetime.strptime(r['fecha'], '%Y-%m-%d').date() for r in registros_db.data}
         
-        # Calcular días faltantes (SOLO HASTA AYER)
         dias_faltantes = []
-        for d in range(1, hoy.day): # range(1, hoy.day) excluye 'hoy' y futuros.
+        for d in range(1, hoy.day):
             fecha_iter = date(year_actual, mes_actual, d)
             if es_laborable(fecha_iter) and fecha_iter not in fechas_fichadas:
                 dias_faltantes.append(fecha_iter)
         
-        # MOSTRAR CALENDARIO VISUAL
         st.markdown(generar_calendario_html(year_actual, mes_actual, fechas_fichadas, dias_faltantes), unsafe_allow_html=True)
         st.write("") 
         
         # ---------------------------------------------------------
-        # OPCIÓN A: REGISTRAR HOY O CORREGIR PASADO
+        # A: REGISTRAR HOY O CORREGIR PASADO (Día único)
         # ---------------------------------------------------------
-        st.markdown("### 📝 Registrar Jornada")
+        st.markdown("### 📝 Registrar Jornada / Corregir Pasado")
         
         with st.container():
             opciones_fecha = [hoy] + dias_faltantes
@@ -251,20 +256,17 @@ else:
             c_fecha, c_motivo = st.columns([2, 1])
             fecha_selec = c_fecha.selectbox("Selecciona día:", opciones_fecha, format_func=formatear_fecha)
             
-            # Campos pre-rellenados
             col1, col2, col3 = st.columns(3)
             h_entrada = col1.time_input("Entrada", value=time(10, 0))
             h_salida = col2.time_input("Salida", value=time(20, 0))
             h_comida = col3.number_input("Horas Comida", value=1.0, step=0.5)
             
-            # Motivo automático o manual
             motivo = "trabajo"
             if fecha_selec != hoy:
-                st.warning(f"Estás corrigiendo un día pasado. Se requiere aprobación.")
+                st.warning(f"Estás corrigiendo un día pasado. Requiere aprobación.")
                 motivo = c_motivo.selectbox("Motivo:", ["olvido", "asuntos_propios"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
 
             if st.button("💾 Guardar Registro", use_container_width=True, type="primary"):
-                # Verificar duplicados
                 existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
                 if existe.data:
                     st.error("Ya existe registro para este día.")
@@ -273,45 +275,60 @@ else:
                     estado = "pendiente" if es_diferido else "aprobado"
                     data = {"empleado_id": user['id'], "fecha": str(fecha_selec), "hora_entrada": str(h_entrada), "hora_salida": str(h_salida), "horas_descanso": h_comida, "tipo_registro": motivo, "estado": estado}
                     supabase.table('fichajes').insert(data).execute()
-                    if es_diferido: enviar_alerta_email(user['nombre'], fecha_selec, motivo, h_entrada, h_salida, es_futuro=False)
+                    if es_diferido: enviar_alerta_email(user['nombre'], str(fecha_selec), motivo, h_entrada, h_salida, es_futuro=False)
                     st.success("Guardado.")
                     st.rerun()
 
         # ---------------------------------------------------------
-        # OPCIÓN B: PLANIFICAR FUTURO (NUEVO)
+        # B: PLANIFICAR FUTURO (RANGOS Y PERIODOS)
         # ---------------------------------------------------------
         st.write("")
-        with st.expander("✈️ Planificar Vacaciones o Ausencia Futura"):
-            st.info("Solicita aquí tus vacaciones o días libres para que la agenda quede bloqueada.")
-            with st.form("futuro_form"):
+        with st.expander("✈️ Planificar Vacaciones o Periodos Largos"):
+            st.info("Selecciona el día de inicio y el día de fin. Se crearán solicitudes para todos los días laborables intermedios.")
+            
+            with st.form("futuro_form_rango"):
                 col_f1, col_f2 = st.columns(2)
-                fecha_futura = col_f1.date_input("Fecha futura", min_value=hoy + timedelta(days=1))
+                # Date input con rango
+                rango_fechas = col_f1.date_input("Selecciona Periodo (Inicio - Fin)", value=[], min_value=hoy + timedelta(days=1))
                 motivo_futuro = col_f2.selectbox("Tipo:", ["vacaciones_nopl", "asuntos_propios"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
+                nota = st.text_input("Nota (Opcional)", placeholder="Ej: Viaje familiar")
                 
-                nota = st.text_input("Nota (Opcional)", placeholder="Ej: Tengo médico a las 10:00")
-                
-                if st.form_submit_button("Enviar Solicitud"):
-                    # Verificar si es laborable o ya existe
-                    if not es_laborable(fecha_futura):
-                        st.warning("Ese día es festivo o fin de semana.")
+                if st.form_submit_button("📅 Solicitar Periodo"):
+                    if len(rango_fechas) != 2:
+                        st.warning("Por favor, selecciona una fecha de INICIO y una fecha de FIN en el calendario.")
                     else:
-                        existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_futura)).execute()
-                        if existe.data:
-                            st.error("Ya hay algo planificado ese día.")
-                        else:
-                            # Guardamos como pendiente
-                            data = {
-                                "empleado_id": user['id'], 
-                                "fecha": str(fecha_futura), 
-                                "tipo_registro": motivo_futuro, 
-                                "estado": "pendiente",
-                                "notas_admin": nota,
-                                "hora_entrada": "00:00", "hora_salida": "00:00", "horas_descanso": 0 # Valores dummy para vacaciones
-                            }
-                            supabase.table('fichajes').insert(data).execute()
-                            enviar_alerta_email(user['nombre'], fecha_futura, motivo_futuro, "00:00", "00:00", es_futuro=True)
-                            st.success("Solicitud enviada a Alberto.")
+                        inicio, fin = rango_fechas
+                        delta = fin - inicio
+                        dias_creados = 0
+                        
+                        # Iterar por todos los días del rango
+                        for i in range(delta.days + 1):
+                            dia_actual = inicio + timedelta(days=i)
+                            
+                            # Si es laborable
+                            if es_laborable(dia_actual):
+                                # Verificar que no exista ya
+                                existe = supabase.table('fichajes').select("id").eq('empleado_id', user['id']).eq('fecha', str(dia_actual)).execute()
+                                if not existe.data:
+                                    data = {
+                                        "empleado_id": user['id'], 
+                                        "fecha": str(dia_actual), 
+                                        "tipo_registro": motivo_futuro, 
+                                        "estado": "pendiente",
+                                        "notas_admin": f"Periodo: {inicio.strftime('%d/%m')} - {fin.strftime('%d/%m')}. {nota}",
+                                        "hora_entrada": "00:00", "hora_salida": "00:00", "horas_descanso": 0
+                                    }
+                                    supabase.table('fichajes').insert(data).execute()
+                                    dias_creados += 1
+                        
+                        if dias_creados > 0:
+                            # Enviar UN solo email resumen
+                            periodo_str = f"{inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}"
+                            enviar_alerta_email(user['nombre'], periodo_str, motivo_futuro, "00:00", "00:00", es_futuro=True, es_rango=True)
+                            st.success(f"Solicitud enviada para {dias_creados} días laborables. Se ha notificado a administración.")
                             st.rerun()
+                        else:
+                            st.warning("No se ha creado ningún registro (quizás eran todo festivos o ya estaban registrados).")
 
         st.divider()
         if st.button("Cerrar Sesión"):
