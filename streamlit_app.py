@@ -152,7 +152,7 @@ if not usuarios.data: st.stop()
 mapa_usuarios = {u['nombre']: u for u in usuarios.data}
 
 if 'usuario' not in st.session_state:
-    st.markdown("### 👋 Acceso Empleados")
+    st.markdown("### 👋 Acceso Registro Horario")
     col1, col2 = st.columns(2)
     nombre = col1.selectbox("Nombre", [""] + list(mapa_usuarios.keys()))
     pin = col2.text_input("PIN", type="password")
