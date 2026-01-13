@@ -28,11 +28,13 @@ FESTIVOS = [
     date(2025, 10, 9), date(2025, 11, 1), date(2025, 12, 6), date(2025, 12, 8), date(2025, 12, 25)
 ]
 
+# --- MODIFICACIÓN 1: AÑADIR OPCIÓN NO TRABAJADO ---
 TIPOS_REGISTRO = {
     "trabajo": "✅ Jornada Realizada",
     "olvido": "🤦 Registro Olvidado (Corrección)",
     "vacaciones_nopl": "🏖️ Vacaciones (Solicitud)",
-    "asuntos_propios": "🏠 Asuntos Propios (Solicitud)"
+    "asuntos_propios": "🏠 Asuntos Propios (Solicitud)",
+    "no_trabajado": "⛔ No Trabajado / Clínica Cerrada"
 }
 
 # --- CONEXIÓN SUPABASE ---
@@ -256,28 +258,79 @@ else:
             c_fecha, c_motivo = st.columns([2, 1])
             fecha_selec = c_fecha.selectbox("Selecciona día:", opciones_fecha, format_func=formatear_fecha)
             
+            # Campos de hora (solo visibles/útiles si es jornada normal, pero los dejamos para simplificar)
             col1, col2, col3 = st.columns(3)
             h_entrada = col1.time_input("Entrada", value=time(10, 0))
             h_salida = col2.time_input("Salida", value=time(20, 0))
             h_comida = col3.number_input("Horas Comida", value=1.0, step=0.5)
             
-            motivo = "trabajo"
+            # --- CASO 1: CORREGIR DÍA PASADO ---
             if fecha_selec != hoy:
                 st.warning(f"Estás corrigiendo un día pasado. Requiere aprobación.")
-                motivo = c_motivo.selectbox("Motivo:", ["olvido", "asuntos_propios"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
+                # --- MODIFICACIÓN 2: AÑADIDO 'no_trabajado' AL SELECTOR PASADO ---
+                motivo = c_motivo.selectbox("Motivo:", ["olvido", "asuntos_propios", "no_trabajado"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
+                
+                if st.button("💾 Enviar Solicitud", use_container_width=True, type="primary"):
+                    existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
+                    if existe.data:
+                        st.error("Ya existe registro para este día.")
+                    else:
+                        # Si es 'No trabajado', forzamos horas a 0
+                        if motivo == "no_trabajado":
+                             h_in_db, h_out_db, h_desc_db = "00:00", "00:00", 0
+                        else:
+                             h_in_db, h_out_db, h_desc_db = str(h_entrada), str(h_salida), h_comida
 
-            if st.button("💾 Guardar Registro", use_container_width=True, type="primary"):
-                existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
-                if existe.data:
-                    st.error("Ya existe registro para este día.")
-                else:
-                    es_diferido = (fecha_selec != hoy)
-                    estado = "pendiente" if es_diferido else "aprobado"
-                    data = {"empleado_id": user['id'], "fecha": str(fecha_selec), "hora_entrada": str(h_entrada), "hora_salida": str(h_salida), "horas_descanso": h_comida, "tipo_registro": motivo, "estado": estado}
-                    supabase.table('fichajes').insert(data).execute()
-                    if es_diferido: enviar_alerta_email(user['nombre'], str(fecha_selec), motivo, h_entrada, h_salida, es_futuro=False)
-                    st.success("Guardado.")
-                    st.rerun()
+                        data = {
+                            "empleado_id": user['id'], 
+                            "fecha": str(fecha_selec), 
+                            "hora_entrada": h_in_db, 
+                            "hora_salida": h_out_db, 
+                            "horas_descanso": h_desc_db, 
+                            "tipo_registro": motivo, 
+                            "estado": "pendiente"
+                        }
+                        supabase.table('fichajes').insert(data).execute()
+                        enviar_alerta_email(user['nombre'], str(fecha_selec), motivo, h_in_db, h_out_db, es_futuro=False)
+                        st.success("Guardado.")
+                        st.rerun()
+
+            # --- CASO 2: REGISTRAR HOY ---
+            else:
+                st.caption("Introduce horas trabajadas o indica que hoy NO se trabaja.")
+                # --- MODIFICACIÓN 3: BOTÓN ADICIONAL PARA HOY ---
+                c_save, c_nowork = st.columns(2)
+                
+                # BOTÓN A: GUARDAR TRABAJO
+                if c_save.button("💾 Guardar Jornada Trabajada", use_container_width=True, type="primary"):
+                    existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
+                    if existe.data:
+                        st.error("Ya has fichado hoy.")
+                    else:
+                        data = {
+                            "empleado_id": user['id'], "fecha": str(fecha_selec), 
+                            "hora_entrada": str(h_entrada), "hora_salida": str(h_salida), 
+                            "horas_descanso": h_comida, "tipo_registro": "trabajo", "estado": "aprobado"
+                        }
+                        supabase.table('fichajes').insert(data).execute()
+                        st.success("Jornada registrada.")
+                        st.rerun()
+                
+                # BOTÓN B: NO TRABAJADO HOY
+                if c_nowork.button("⛔ Hoy NO se trabaja / Cerrado", use_container_width=True):
+                    existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
+                    if existe.data:
+                        st.error("Ya has fichado hoy.")
+                    else:
+                        # Guardamos con 0 horas
+                        data = {
+                            "empleado_id": user['id'], "fecha": str(fecha_selec), 
+                            "hora_entrada": "00:00", "hora_salida": "00:00", 
+                            "horas_descanso": 0, "tipo_registro": "no_trabajado", "estado": "aprobado"
+                        }
+                        supabase.table('fichajes').insert(data).execute()
+                        st.success("Registrado como No Trabajado.")
+                        st.rerun()
 
         # ---------------------------------------------------------
         # B: PLANIFICAR FUTURO (RANGOS Y PERIODOS)
@@ -290,7 +343,8 @@ else:
                 col_f1, col_f2 = st.columns(2)
                 # Date input con rango
                 rango_fechas = col_f1.date_input("Selecciona Periodo (Inicio - Fin)", value=[], min_value=hoy + timedelta(days=1))
-                motivo_futuro = col_f2.selectbox("Tipo:", ["vacaciones_nopl", "asuntos_propios"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
+                # También añadimos 'no_trabajado' aquí por si quieres planificar cierre futuro
+                motivo_futuro = col_f2.selectbox("Tipo:", ["vacaciones_nopl", "asuntos_propios", "no_trabajado"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
                 nota = st.text_input("Nota (Opcional)", placeholder="Ej: Viaje familiar")
                 
                 if st.form_submit_button("📅 Solicitar Periodo"):
