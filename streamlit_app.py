@@ -7,6 +7,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import calendar
+import io  # Necesario para crear el archivo Excel
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Gestión Clínica Carmen Fontes", page_icon="🦷", layout="wide")
@@ -28,7 +29,6 @@ FESTIVOS = [
     date(2025, 10, 9), date(2025, 11, 1), date(2025, 12, 6), date(2025, 12, 8), date(2025, 12, 25)
 ]
 
-# --- MODIFICACIÓN 1: AÑADIR OPCIÓN NO TRABAJADO ---
 TIPOS_REGISTRO = {
     "trabajo": "✅ Jornada Realizada",
     "olvido": "🤦 Registro Olvidado (Corrección)",
@@ -52,9 +52,6 @@ def es_laborable(fecha: date):
     return True
 
 def enviar_alerta_email(nombre_emp, fecha_str, motivo, entrada, salida, es_futuro=False, es_rango=False):
-    """
-    Envía email. fecha_str puede ser una fecha simple o un texto de rango "X al Y".
-    """
     try:
         smtp_server = st.secrets["EMAIL"]["smtp_server"]
         port = st.secrets["EMAIL"]["smtp_port"]
@@ -133,16 +130,13 @@ def generar_calendario_html(year, month, dias_fichados, dias_faltantes):
             if not es_laborable(day):
                 html += f"<td class='status-weekend'>{day_content}</td>"
             elif day in dias_fichados:
-                # Si es futuro y está fichado, es "Planificado"
                 if day > hoy:
                      html += f"<td>{day_content}<div class='status-plan'>🗓️ Planificado</div></td>"
                 else:
                      html += f"<td>{day_content}<div class='status-ok'>✅ Registrado</div></td>"
             elif day in dias_faltantes:
-                # Solo marcamos falta si está en la lista de faltantes
                 html += f"<td style='background-color: #FFEBEE;'>{day_content}<div class='status-missing'>⚠️ FALTA</div></td>"
             else:
-                # Futuro o laborable sin pasar
                 html += f"<td>{day_content}</td>"
         html += "</tr>"
     html += "</tbody></table>"
@@ -172,7 +166,7 @@ else:
     # ==============================================================================
     if user['nombre'] == 'Administrador':
         st.info("⚙️ Modo Administradora")
-        tab1, tab2, tab3 = st.tabs(["👥 Equipo", "📩 Aprobaciones", "📊 Informes"])
+        tab1, tab2, tab3 = st.tabs(["👥 Equipo", "📩 Aprobaciones", "📊 Informes y Auditoría"])
         
         with tab1: # Altas
             with st.form("new_emp"):
@@ -206,13 +200,53 @@ else:
                         supabase.table('fichajes').update({"estado": "rechazado"}).eq('id', p['id']).execute()
                         st.rerun()
         
-        with tab3: # Excel
-            if st.button("Descargar Excel Mensual"):
-                df = pd.DataFrame(supabase.table('fichajes').select("*, empleados(nombre)").execute().data)
+        with tab3: # Excel Auditoría
+            st.subheader("🗓️ Exportación por Rango de Fechas")
+            
+            # Selectores de fecha para auditoría
+            col_d1, col_d2 = st.columns(2)
+            fecha_inicio = col_d1.date_input("Fecha Inicio", value=date.today().replace(day=1))
+            fecha_fin = col_d2.date_input("Fecha Fin", value=date.today())
+            
+            if st.button("🔍 Buscar y Generar Excel"):
+                # Consulta filtrada por rango
+                response = supabase.table('fichajes').select("*, empleados(nombre)")\
+                    .gte('fecha', str(fecha_inicio))\
+                    .lte('fecha', str(fecha_fin))\
+                    .order('fecha', desc=True)\
+                    .execute()
+                
+                df = pd.DataFrame(response.data)
+                
                 if not df.empty:
-                    st.dataframe(df)
+                    # Limpieza de datos para el Excel
+                    # Extraer el nombre del objeto 'empleados' y ponerlo en una columna plana
+                    df['nombre_empleado'] = df['empleados'].apply(lambda x: x['nombre'] if x else 'Desconocido')
+                    df = df.drop(columns=['empleados'])
+                    
+                    # Reordenar columnas para que sea legible en la inspección
+                    columnas_ordenadas = ['fecha', 'nombre_empleado', 'hora_entrada', 'hora_salida', 'horas_descanso', 'tipo_registro', 'estado', 'notas_admin']
+                    # Asegurarnos de que las columnas existan antes de ordenar
+                    cols_finales = [c for c in columnas_ordenadas if c in df.columns]
+                    df_final = df[cols_finales]
+
+                    st.success(f"Se han encontrado {len(df)} registros.")
+                    st.dataframe(df_final.head()) # Previsualización
+
+                    # Generar Excel en memoria
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                        df_final.to_excel(writer, index=False, sheet_name='Informe')
+                    
+                    # Botón de descarga
+                    st.download_button(
+                        label=f"📥 Descargar Excel ({fecha_inicio} a {fecha_fin})",
+                        data=buffer.getvalue(),
+                        file_name=f"Informe_Fichajes_{fecha_inicio}_{fecha_fin}.xlsx",
+                        mime="application/vnd.ms-excel"
+                    )
                 else:
-                    st.warning("No hay datos")
+                    st.warning("No se encontraron registros en ese rango de fechas.")
 
         if st.button("Salir"): del st.session_state['usuario']; st.rerun()
 
@@ -258,16 +292,13 @@ else:
             c_fecha, c_motivo = st.columns([2, 1])
             fecha_selec = c_fecha.selectbox("Selecciona día:", opciones_fecha, format_func=formatear_fecha)
             
-            # Campos de hora (solo visibles/útiles si es jornada normal, pero los dejamos para simplificar)
             col1, col2, col3 = st.columns(3)
             h_entrada = col1.time_input("Entrada", value=time(10, 0))
             h_salida = col2.time_input("Salida", value=time(20, 0))
             h_comida = col3.number_input("Horas Comida", value=1.0, step=0.5)
             
-            # --- CASO 1: CORREGIR DÍA PASADO ---
             if fecha_selec != hoy:
                 st.warning(f"Estás corrigiendo un día pasado. Requiere aprobación.")
-                # --- MODIFICACIÓN 2: AÑADIDO 'no_trabajado' AL SELECTOR PASADO ---
                 motivo = c_motivo.selectbox("Motivo:", ["olvido", "asuntos_propios", "no_trabajado"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
                 
                 if st.button("💾 Enviar Solicitud", use_container_width=True, type="primary"):
@@ -275,33 +306,25 @@ else:
                     if existe.data:
                         st.error("Ya existe registro para este día.")
                     else:
-                        # Si es 'No trabajado', forzamos horas a 0
                         if motivo == "no_trabajado":
                              h_in_db, h_out_db, h_desc_db = "00:00", "00:00", 0
                         else:
                              h_in_db, h_out_db, h_desc_db = str(h_entrada), str(h_salida), h_comida
 
                         data = {
-                            "empleado_id": user['id'], 
-                            "fecha": str(fecha_selec), 
-                            "hora_entrada": h_in_db, 
-                            "hora_salida": h_out_db, 
-                            "horas_descanso": h_desc_db, 
-                            "tipo_registro": motivo, 
-                            "estado": "pendiente"
+                            "empleado_id": user['id'], "fecha": str(fecha_selec), 
+                            "hora_entrada": h_in_db, "hora_salida": h_out_db, 
+                            "horas_descanso": h_desc_db, "tipo_registro": motivo, "estado": "pendiente"
                         }
                         supabase.table('fichajes').insert(data).execute()
                         enviar_alerta_email(user['nombre'], str(fecha_selec), motivo, h_in_db, h_out_db, es_futuro=False)
                         st.success("Guardado.")
                         st.rerun()
 
-            # --- CASO 2: REGISTRAR HOY ---
             else:
                 st.caption("Introduce horas trabajadas o indica que hoy NO se trabaja.")
-                # --- MODIFICACIÓN 3: BOTÓN ADICIONAL PARA HOY ---
                 c_save, c_nowork = st.columns(2)
                 
-                # BOTÓN A: GUARDAR TRABAJO
                 if c_save.button("💾 Guardar Jornada Trabajada", use_container_width=True, type="primary"):
                     existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
                     if existe.data:
@@ -316,13 +339,11 @@ else:
                         st.success("Jornada registrada.")
                         st.rerun()
                 
-                # BOTÓN B: NO TRABAJADO HOY
                 if c_nowork.button("⛔ Hoy NO se trabaja / Cerrado", use_container_width=True):
                     existe = supabase.table('fichajes').select("*").eq('empleado_id', user['id']).eq('fecha', str(fecha_selec)).execute()
                     if existe.data:
                         st.error("Ya has fichado hoy.")
                     else:
-                        # Guardamos con 0 horas
                         data = {
                             "empleado_id": user['id'], "fecha": str(fecha_selec), 
                             "hora_entrada": "00:00", "hora_salida": "00:00", 
@@ -333,7 +354,7 @@ else:
                         st.rerun()
 
         # ---------------------------------------------------------
-        # B: PLANIFICAR FUTURO (RANGOS Y PERIODOS)
+        # B: PLANIFICAR FUTURO
         # ---------------------------------------------------------
         st.write("")
         with st.expander("✈️ Planificar Vacaciones o Periodos Largos"):
@@ -341,9 +362,7 @@ else:
             
             with st.form("futuro_form_rango"):
                 col_f1, col_f2 = st.columns(2)
-                # Date input con rango
                 rango_fechas = col_f1.date_input("Selecciona Periodo (Inicio - Fin)", value=[], min_value=hoy + timedelta(days=1))
-                # También añadimos 'no_trabajado' aquí por si quieres planificar cierre futuro
                 motivo_futuro = col_f2.selectbox("Tipo:", ["vacaciones_nopl", "asuntos_propios", "no_trabajado"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
                 nota = st.text_input("Nota (Opcional)", placeholder="Ej: Viaje familiar")
                 
@@ -355,20 +374,14 @@ else:
                         delta = fin - inicio
                         dias_creados = 0
                         
-                        # Iterar por todos los días del rango
                         for i in range(delta.days + 1):
                             dia_actual = inicio + timedelta(days=i)
-                            
-                            # Si es laborable
                             if es_laborable(dia_actual):
-                                # Verificar que no exista ya
                                 existe = supabase.table('fichajes').select("id").eq('empleado_id', user['id']).eq('fecha', str(dia_actual)).execute()
                                 if not existe.data:
                                     data = {
-                                        "empleado_id": user['id'], 
-                                        "fecha": str(dia_actual), 
-                                        "tipo_registro": motivo_futuro, 
-                                        "estado": "pendiente",
+                                        "empleado_id": user['id'], "fecha": str(dia_actual), 
+                                        "tipo_registro": motivo_futuro, "estado": "pendiente",
                                         "notas_admin": f"Periodo: {inicio.strftime('%d/%m')} - {fin.strftime('%d/%m')}. {nota}",
                                         "hora_entrada": "00:00", "hora_salida": "00:00", "horas_descanso": 0
                                     }
@@ -376,13 +389,12 @@ else:
                                     dias_creados += 1
                         
                         if dias_creados > 0:
-                            # Enviar UN solo email resumen
                             periodo_str = f"{inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}"
                             enviar_alerta_email(user['nombre'], periodo_str, motivo_futuro, "00:00", "00:00", es_futuro=True, es_rango=True)
-                            st.success(f"Solicitud enviada para {dias_creados} días laborables. Se ha notificado a administración.")
+                            st.success(f"Solicitud enviada para {dias_creados} días laborables.")
                             st.rerun()
                         else:
-                            st.warning("No se ha creado ningún registro (quizás eran todo festivos o ya estaban registrados).")
+                            st.warning("No se ha creado ningún registro.")
 
         st.divider()
         if st.button("Cerrar Sesión"):
