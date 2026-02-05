@@ -13,11 +13,15 @@ import io  # Necesario para crear el archivo Excel
 st.set_page_config(page_title="Gestión Clínica Carmen Fontes", page_icon="🦷", layout="wide")
 TZ_VALENCIA = pytz.timezone('Europe/Madrid')
 
-# Intentar cargar logo
-try:
-    st.image("logoccf.png", width=250)
-except:
-    st.markdown("<h2 style='color:#D4A5A5;'>🦷 Clínica Carmen Fontes</h2>", unsafe_allow_html=True)
+# --- LOGO CENTRADO Y GRANDE ---
+# Usamos columnas para centrarlo visualmente
+c_logo1, c_logo2, c_logo3 = st.columns([1, 2, 1])
+with c_logo2:
+    try:
+        # width=500 hace que se vea mucho más grande
+        st.image("logoccf.png", width=500)
+    except:
+        st.markdown("<h1 style='text-align: center; color:#D4A5A5;'>🦷 Clínica Carmen Fontes</h1>", unsafe_allow_html=True)
 
 # --- FESTIVOS Y MOTIVOS ---
 FESTIVOS = [
@@ -148,15 +152,27 @@ if not usuarios.data: st.stop()
 mapa_usuarios = {u['nombre']: u for u in usuarios.data}
 
 if 'usuario' not in st.session_state:
-    st.markdown("### 👋 Acceso Registro Horario")
-    col1, col2 = st.columns(2)
-    nombre = col1.selectbox("Nombre", [""] + list(mapa_usuarios.keys()))
-    pin = col2.text_input("PIN", type="password")
-    if st.button("Entrar", type="primary") and nombre and pin:
-        if mapa_usuarios[nombre]['pin_secreto'] == pin:
-            st.session_state['usuario'] = mapa_usuarios[nombre]
-            st.rerun()
-        else: st.error("PIN Incorrecto")
+    st.markdown("<h3 style='text-align:center;'>👋 Acceso Registro Horario</h3>", unsafe_allow_html=True)
+    
+    # Columnas centradas para el login
+    c_log1, c_log2, c_log3 = st.columns([1, 2, 1])
+    
+    with c_log2:
+        # El selectbox de streamlit YA es un autocompletar. Si escriben "L", salen las Lorenas.
+        # Ordenamos la lista para que sea más fácil buscar visualmente también.
+        lista_nombres_ordenada = sorted(list(mapa_usuarios.keys()))
+        nombre = st.selectbox("Selecciona o escribe tu nombre:", [""] + lista_nombres_ordenada)
+        pin = st.text_input("PIN de acceso:", type="password")
+        
+        if st.button("Entrar 🔓", type="primary", use_container_width=True):
+            if nombre and pin:
+                if mapa_usuarios[nombre]['pin_secreto'] == pin:
+                    st.session_state['usuario'] = mapa_usuarios[nombre]
+                    st.rerun()
+                else:
+                    st.error("🚫 PIN Incorrecto")
+            else:
+                st.warning("Selecciona usuario e introduce PIN")
 
 else:
     user = st.session_state['usuario']
@@ -219,26 +235,19 @@ else:
                 df = pd.DataFrame(response.data)
                 
                 if not df.empty:
-                    # Limpieza de datos para el Excel
-                    # Extraer el nombre del objeto 'empleados' y ponerlo en una columna plana
                     df['nombre_empleado'] = df['empleados'].apply(lambda x: x['nombre'] if x else 'Desconocido')
                     df = df.drop(columns=['empleados'])
-                    
-                    # Reordenar columnas para que sea legible en la inspección
                     columnas_ordenadas = ['fecha', 'nombre_empleado', 'hora_entrada', 'hora_salida', 'horas_descanso', 'tipo_registro', 'estado', 'notas_admin']
-                    # Asegurarnos de que las columnas existan antes de ordenar
                     cols_finales = [c for c in columnas_ordenadas if c in df.columns]
                     df_final = df[cols_finales]
 
                     st.success(f"Se han encontrado {len(df)} registros.")
-                    st.dataframe(df_final.head()) # Previsualización
+                    st.dataframe(df_final.head()) 
 
-                    # Generar Excel en memoria
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                         df_final.to_excel(writer, index=False, sheet_name='Informe')
                     
-                    # Botón de descarga
                     st.download_button(
                         label=f"📥 Descargar Excel ({fecha_inicio} a {fecha_fin})",
                         data=buffer.getvalue(),
@@ -257,48 +266,68 @@ else:
         st.markdown(f"### Hola, {user['nombre']} 👋")
         
         hoy = datetime.now(TZ_VALENCIA).date()
-        mes_actual = hoy.month
-        year_actual = hoy.year
         
-        _, num_dias = calendar.monthrange(year_actual, mes_actual)
-        inicio_mes = date(year_actual, mes_actual, 1)
-        fin_mes = date(year_actual, mes_actual, num_dias)
+        # --- NUEVO: SELECTOR DE MES PARA VER EL PASADO ---
+        c_nav1, c_nav2 = st.columns([1, 3])
+        fecha_visualizar = c_nav1.date_input("📅 Cambiar Mes a Visualizar:", value=hoy)
         
+        mes_target = fecha_visualizar.month
+        year_target = fecha_visualizar.year
+        
+        _, num_dias = calendar.monthrange(year_target, mes_target)
+        inicio_mes = date(year_target, mes_target, 1)
+        fin_mes = date(year_target, mes_target, num_dias)
+        
+        # Consultamos el mes SELECCIONADO (puede ser pasado)
         registros_db = supabase.table('fichajes').select("fecha, estado").eq('empleado_id', user['id']).gte('fecha', inicio_mes).lte('fecha', fin_mes).execute()
         fechas_fichadas = {datetime.strptime(r['fecha'], '%Y-%m-%d').date() for r in registros_db.data}
         
+        # Calculamos faltas del mes seleccionado
         dias_faltantes = []
-        for d in range(1, hoy.day):
-            fecha_iter = date(year_actual, mes_actual, d)
+        
+        # Si estamos viendo el mes actual, calculamos faltas hasta ayer
+        # Si estamos viendo un mes pasado, calculamos faltas hasta el final de ese mes
+        if mes_target == hoy.month and year_target == hoy.year:
+            dia_limite = hoy.day # Hasta ayer
+        elif date(year_target, mes_target, 1) > hoy:
+             dia_limite = 1 # Futuro, no hay faltas
+        else:
+             dia_limite = num_dias + 1 # Mes pasado completo
+        
+        for d in range(1, dia_limite):
+            fecha_iter = date(year_target, mes_target, d)
             if es_laborable(fecha_iter) and fecha_iter not in fechas_fichadas:
                 dias_faltantes.append(fecha_iter)
         
-        st.markdown(generar_calendario_html(year_actual, mes_actual, fechas_fichadas, dias_faltantes), unsafe_allow_html=True)
+        st.markdown(generar_calendario_html(year_target, mes_target, fechas_fichadas, dias_faltantes), unsafe_allow_html=True)
         st.write("") 
         
         # ---------------------------------------------------------
-        # A: REGISTRAR HOY O CORREGIR PASADO (Día único)
+        # A: REGISTRAR HOY O CORREGIR PASADO
         # ---------------------------------------------------------
         st.markdown("### 📝 Registrar Jornada / Corregir Pasado")
         
         with st.container():
+            # Las opciones de corrección ahora dependen del mes que estemos visualizando + hoy
             opciones_fecha = [hoy] + dias_faltantes
-            opciones_fecha.sort(reverse=True)
+            # Eliminamos duplicados si hoy está en faltas por error y ordenamos
+            opciones_fecha = sorted(list(set(opciones_fecha)), reverse=True)
             
             def formatear_fecha(d):
                 if d == hoy: return f"📅 HOY ({d.strftime('%d/%m')})"
                 return f"🔴 REGULARIZAR: {d.strftime('%d/%m/%Y')}"
 
             c_fecha, c_motivo = st.columns([2, 1])
-            fecha_selec = c_fecha.selectbox("Selecciona día:", opciones_fecha, format_func=formatear_fecha)
+            fecha_selec = c_fecha.selectbox("Selecciona día a registrar:", opciones_fecha, format_func=formatear_fecha)
             
             col1, col2, col3 = st.columns(3)
             h_entrada = col1.time_input("Entrada", value=time(10, 0))
             h_salida = col2.time_input("Salida", value=time(20, 0))
             h_comida = col3.number_input("Horas Comida", value=1.0, step=0.5)
             
+            # --- CASO 1: CORREGIR DÍA PASADO ---
             if fecha_selec != hoy:
-                st.warning(f"Estás corrigiendo un día pasado. Requiere aprobación.")
+                st.warning(f"Estás corrigiendo un día pasado ({fecha_selec}). Requiere aprobación.")
                 motivo = c_motivo.selectbox("Motivo:", ["olvido", "asuntos_propios", "no_trabajado"], format_func=lambda x: TIPOS_REGISTRO.get(x, x))
                 
                 if st.button("💾 Enviar Solicitud", use_container_width=True, type="primary"):
@@ -321,6 +350,7 @@ else:
                         st.success("Guardado.")
                         st.rerun()
 
+            # --- CASO 2: REGISTRAR HOY ---
             else:
                 st.caption("Introduce horas trabajadas o indica que hoy NO se trabaja.")
                 c_save, c_nowork = st.columns(2)
